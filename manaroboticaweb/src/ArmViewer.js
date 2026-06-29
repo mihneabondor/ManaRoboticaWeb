@@ -38,6 +38,48 @@ const FINGER_JOINT_SUFFIX = {
     });
 });
 
+// ─── Rotation Limits (in radians) ────────────────────────────────────────────
+const ROTATION_LIMITS = {
+    // Finger joints - natural bending limits
+    finger_j0: { x: [0, 1], y: [-0.3, 0.3], z: [0, 1] },  // MCP: can curl forward
+    finger_j1: { x: [-0.1, 1.7], y: [-0.2, 0.2], z: [-0.1, 0.1] },  // PIP: curls more
+    finger_j2: { x: [-0.1, 1.5], y: [-0.1, 0.1], z: [-0.1, 0.1] },  // DIP: curls forward only
+
+    // Thumb has more freedom
+    thumb_j0: { x: [-0.5, 1.2], y: [-0.8, 0.8], z: [-0.6, 0.6] },   // CMC: very mobile
+    thumb_j1: { x: [-0.2, 1.5], y: [-0.4, 0.4], z: [-0.2, 0.2] },   // MCP: moderate
+    thumb_j2: { x: [-0.1, 1.3], y: [-0.2, 0.2], z: [-0.1, 0.1] },   // IP: mostly forward
+
+    // Arm joints
+    shoulder: { x: [-2.0, 2.0], y: [-1.5, 1.5], z: [-1.0, 1.0] },
+    elbow: { x: [0, 2.4], y: [-0.2, 0.2], z: [-0.1, 0.1] },          // Elbow bends one way
+    wrist: { x: [-0.8, 0.8], y: [-0.5, 0.5], z: [-0.3, 0.3] },
+};
+
+function getRotationLimits(jointName) {
+    // Determine joint type from name
+    if (jointName.includes('thumb_j0')) return ROTATION_LIMITS.thumb_j0;
+    if (jointName.includes('thumb_j1')) return ROTATION_LIMITS.thumb_j1;
+    if (jointName.includes('thumb_j2')) return ROTATION_LIMITS.thumb_j2;
+    if (jointName.includes('_j0')) return ROTATION_LIMITS.finger_j0;
+    if (jointName.includes('_j1')) return ROTATION_LIMITS.finger_j1;
+    if (jointName.includes('_j2')) return ROTATION_LIMITS.finger_j2;
+    if (jointName.includes('shoulder')) return ROTATION_LIMITS.shoulder;
+    if (jointName.includes('elbow')) return ROTATION_LIMITS.elbow;
+    if (jointName.includes('wrist')) return ROTATION_LIMITS.wrist;
+
+    // Default: unlimited
+    return { x: [-Math.PI, Math.PI], y: [-Math.PI, Math.PI], z: [-Math.PI, Math.PI] };
+}
+
+function clampRotation(rotation, limits) {
+    return {
+        x: Math.max(limits.x[0], Math.min(limits.x[1], rotation.x)),
+        y: Math.max(limits.y[0], Math.min(limits.y[1], rotation.y)),
+        z: Math.max(limits.z[0], Math.min(limits.z[1], rotation.z)),
+    };
+}
+
 // ─── Connect Button ───────────────────────────────────────────────────────────
 function ConnectButton() {
     const [phase, setPhase] = useState("idle");
@@ -102,37 +144,165 @@ function ConnectButton() {
 }
 
 // ─── Joint Info Panel ─────────────────────────────────────────────────────────
-function JointPanel({ joint, rotation, onClose }) {
+function JointPanel({ joint, rotation, onClose, onRotationChange }) {
     if (!joint) return null;
+
+    const toDeg = (rad) => rad * (180 / Math.PI);
+    const toRad = (deg) => deg * (Math.PI / 180);
+
+    // Determine which axes to show based on joint type
+    const getAxesToShow = (jointName) => {
+        // Fingers only need Z rotation (curl)
+        if (jointName.includes('_j0') || jointName.includes('_j1') || jointName.includes('_j2')) {
+            return ['z'];
+        }
+        // Wrist needs X and Y (flexion/extension and deviation)
+        if (jointName.includes('wrist')) {
+            return ['x', 'y'];
+        }
+        // Elbow primarily needs X (flexion/extension)
+        if (jointName.includes('elbow')) {
+            return ['x'];
+        }
+        // Shoulder needs all axes
+        if (jointName.includes('shoulder')) {
+            return ['x', 'y', 'z'];
+        }
+        // Default: show all
+        return ['x', 'y', 'z'];
+    };
+
+    const axesToShow = getAxesToShow(joint);
+
+    // Check if this joint needs inverted rotation
+    const needsInversion = (jointName, axis) => {
+        if (axis === 'z' && jointName.includes('_j0')) {
+            return jointName.includes('pinky') || jointName.includes('ring') || jointName.includes('middle');
+        }
+        return false;
+    };
+
+    const handleSliderChange = (axis, value) => {
+        let radValue = toRad(parseFloat(value));
+
+        // For j0 Z axis, invert the value so slider goes from 0 to -90
+        if (joint.includes('_j0') && axis === 'z') {
+            radValue = -toRad(parseFloat(value));
+        } else if ((joint.includes('_j1') || joint.includes('_j2')) && axis === 'z') {
+            // For j1 and j2, use value directly
+            radValue = toRad(parseFloat(value));
+        } else if (needsInversion(joint, axis)) {
+            // Only invert for non-finger joints that need it
+            radValue = -radValue;
+        }
+
+        onRotationChange(joint, {
+            x: rotation?.x ?? 0,
+            y: rotation?.y ?? 0,
+            z: rotation?.z ?? 0,
+            [axis]: radValue
+        });
+    };
+
     return (
         <div style={{
             position:"absolute", bottom:32, left:"50%", transform:"translateX(-50%)",
-            background:"rgba(10,18,35,0.82)", border:"1px solid rgba(100,160,255,0.25)",
-            borderRadius:10, padding:"14px 22px", color:"#c8deff",
-            fontFamily:"'Inter', sans-serif", fontSize:13, backdropFilter:"blur(12px)",
-            zIndex:50, minWidth:230, boxShadow:"0 8px 32px rgba(0,0,0,0.4)",
+            background:"rgba(10,18,35,0.92)", border:"1px solid rgba(100,160,255,0.3)",
+            borderRadius:10, padding:"16px 24px", color:"#c8deff",
+            fontFamily:"'Inter', sans-serif", fontSize:13, backdropFilter:"blur(16px)",
+            zIndex:50, minWidth:320, boxShadow:"0 8px 32px rgba(0,0,0,0.5)",
         }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
-        <span style={{ fontWeight:600, letterSpacing:"0.05em", fontSize:14 }}>
-          {JOINT_LABELS[joint] || joint}
-        </span>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <span style={{ fontWeight:600, letterSpacing:"0.05em", fontSize:14 }}>
+                    {JOINT_LABELS[joint] || joint}
+                </span>
                 <button onClick={onClose} style={{
                     background:"none", border:"none", color:"#6a8aaa",
-                    cursor:"pointer", fontSize:18, lineHeight:1, padding:0 }}>×</button>
+                    cursor:"pointer", fontSize:20, lineHeight:1, padding:0 }}>×</button>
             </div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:"6px 12px", fontSize:12 }}>
-                {["X","Y","Z"].map((axis) => (
-                    <div key={axis}>
-                        <div style={{ color:"#4a70a0", marginBottom:2 }}>ROT {axis}</div>
-                        <div style={{ color:"#90b8e8" }}>
-                            {((rotation?.[axis.toLowerCase()] ?? 0) * (180/Math.PI)).toFixed(1)}°
+
+            {axesToShow.map((axis) => {
+                const axisUpper = axis.toUpperCase();
+                let currentValue = rotation?.[axis] ?? 0;
+
+                // If this joint needs inversion, invert the display value too
+                if (needsInversion(joint, axis)) {
+                    currentValue = -currentValue;
+                }
+
+                // Set ranges based on joint type
+                let min = -180;
+                let max = 180;
+
+                // For finger joints Z axis, slider shows offset from rest
+                if (joint.includes('_j0') && axis === 'z') {
+                    // j0: slider goes 0 to 90 (gets inverted to 0 to -90)
+                    min = 0;      // Rest position
+                    max = 90;     // Maximum curl
+                    currentValue = -currentValue; // Invert display to match
+                } else if ((joint.includes('_j1') || joint.includes('_j2')) && axis === 'z') {
+                    // j1/j2: slider goes -90 to 0
+                    min = -90;    // Maximum curl
+                    max = 0;      // Rest position
+                }
+
+                return (
+                    <div key={axis} style={{ marginBottom:12 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                            <span style={{ color:"#5a8abd", fontSize:11, fontWeight:500, letterSpacing:"0.05em" }}>
+                                ROT {axisUpper}
+                            </span>
+                            <span style={{ color:"#90b8e8", fontSize:11, fontWeight:600 }}>
+                                {toDeg(currentValue).toFixed(1)}°
+                            </span>
                         </div>
+                        <input
+                            type="range"
+                            min={min}
+                            max={max}
+                            step={0.5}
+                            value={toDeg(currentValue)}
+                            onChange={(e) => handleSliderChange(axis, e.target.value)}
+                            style={{
+                                width:"100%",
+                                height:4,
+                                borderRadius:2,
+                                background:`linear-gradient(to right, #4a7ba7 0%, #6a9fd4 ${((toDeg(currentValue)-min)/(max-min))*100}%, rgba(100,160,255,0.2) ${((toDeg(currentValue)-min)/(max-min))*100}%, rgba(100,160,255,0.2) 100%)`,
+                                outline:"none",
+                                cursor:"pointer",
+                                WebkitAppearance:"none",
+                                appearance:"none",
+                            }}
+                        />
                     </div>
-                ))}
+                );
+            })}
+
+            <div style={{ marginTop:10, fontSize:11, color:"#4a70a0", lineHeight:1.4, opacity:0.8 }}>
+                Use sliders to control joint rotation
             </div>
-            <div style={{ marginTop:10, fontSize:11, color:"#4a70a0", lineHeight:1.5 }}>
-                Drag to rotate this joint
-            </div>
+
+            <style>{`
+                input[type=range]::-webkit-slider-thumb {
+                    -webkit-appearance: none;
+                    appearance: none;
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 50%;
+                    background: #a0c8ff;
+                    cursor: pointer;
+                    box-shadow: 0 0 8px rgba(160,200,255,0.5);
+                }
+                input[type=range]::-moz-range-thumb {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 50%;
+                    background: #a0c8ff;
+                    cursor: pointer;
+                    border: none;
+                    box-shadow: 0 0 8px rgba(160,200,255,0.5);
+                }
+            `}</style>
         </div>
     );
 }
@@ -231,7 +401,7 @@ function buildHand(parent, side, skinMat, jointMat, palmY, placeholdersRef, lSca
 }
 
 // ─── Three.js Scene Hook ──────────────────────────────────────────────────────
-function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotation) {
+function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotation, setRotationFromSlider) {
     const sceneRef = useRef(null);
 
     useEffect(() => {
@@ -297,6 +467,7 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
 
         const joints        = {};
         const sphereToJoint = new Map();
+        const initialRotations = {}; // Store initial bone rotations
 
         const addLimbJoint = (name, group) => {
             joints[name] = group;
@@ -352,7 +523,7 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
 
         const allSpheres = [...sphereToJoint.keys()];
 
-        sceneRef.current = { scene, camera, renderer, root, joints, sphereToJoint, allSpheres, jointMat, selectedMat };
+        sceneRef.current = { scene, camera, renderer, root, joints, sphereToJoint, allSpheres, jointMat, selectedMat, initialRotations };
 
         // ─── GLTF MECHANICAL RIG LOADING & CALIBRATION ───────────────────────
         // ─── GLTF MECHANICAL RIG LOADING & LIVE MAPPING ───────────────────────
@@ -383,9 +554,11 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
                     // Check if this object matches one of the joint names from your Blender Empties
                     if (joints[child.name]) {
                         const jointName = child.name;
-                        if (child.children.length === 0) {
-                            return;
-                        }
+
+                        // Remove this check - even bones with no children should get spheres
+                        // if (child.children.length === 0) {
+                        //     return;
+                        // }
 
                         let matchingSphere = null;
                         sphereToJoint.forEach((name, sphere) => {
@@ -404,6 +577,37 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
 
                             mappedSpheres.add(matchingSphere);
                         }
+
+                        // For all finger bones, set initial rotation and change rotation order FIRST
+                        if (jointName.includes('_j0') || jointName.includes('_j1') || jointName.includes('_j2')) {
+                            console.log(`${jointName} original rotation:`, {
+                                x: child.rotation.x,
+                                y: child.rotation.y,
+                                z: child.rotation.z,
+                            });
+
+                            // Change rotation order to ZYX for all finger bones to prevent gimbal lock
+                            child.rotation.order = 'ZYX';
+
+                            // Set default Z rotation based on bone type
+                            if (jointName.includes('_j0')) {
+                                child.rotation.z = Math.PI / 2; // 90° for j0 (base knuckle)
+                            }
+                        // j1 and j2 keep their Blender defaults (usually 0)
+
+                            console.log(`${jointName} after setting default:`, {
+                                x: child.rotation.x,
+                                y: child.rotation.y,
+                                z: child.rotation.z,
+                            });
+                        }
+
+                        // Store initial rotation (rest pose) AFTER setting defaults
+                        initialRotations[jointName] = {
+                            x: child.rotation.x,
+                            y: child.rotation.y,
+                            z: child.rotation.z,
+                        };
 
                         // 4. Switch the control dictionary target to the real structural object
                         joints[jointName] = child;
@@ -436,11 +640,8 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
         raycaster.params.Mesh = { threshold: 0.01 };
 
         let orbitActive   = false;
+        let panActive     = false;
         let lastX = 0, lastY = 0;
-        let isDraggingJoint = false;
-        let dragJointName   = null;
-        let dragStartX = 0, dragStartY = 0;
-        let dragStartRotX = 0, dragStartRotY = 0;
 
         const getNDC = (cx, cy) => {
             const rect = canvas.getBoundingClientRect();
@@ -456,27 +657,44 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
             return hits.length > 0 ? sphereToJoint.get(hits[0].object) : null;
         };
 
-        const onDown = (cx, cy) => {
+        const onDown = (cx, cy, button = 0) => {
             const jName = hitTest(cx, cy);
-            if (jName) {
-                isDraggingJoint = true; dragJointName = jName;
-                dragStartX = cx; dragStartY = cy;
-                dragStartRotX = joints[jName].rotation.x;
-                dragStartRotY = joints[jName].rotation.y;
+            if (jName && button === 0) {
+                // Select the joint and initialize rotation state
+                const joint = joints[jName];
+                if (joint) {
+                    // For finger joints, calculate the offset from initial rotation
+                    const initialRot = sceneRef.current?.initialRotations?.[jName];
+                    if ((jName.includes('_j0') || jName.includes('_j1') || jName.includes('_j2')) && initialRot) {
+                        // Send offset value (current - initial)
+                        onJointRotation(jName, {
+                            x: joint.rotation.x - initialRot.x,
+                            y: joint.rotation.y - initialRot.y,
+                            z: joint.rotation.z - initialRot.z
+                        });
+                    } else {
+                        // For non-finger joints, send absolute rotation
+                        onJointRotation(jName, {
+                            x: joint.rotation.x,
+                            y: joint.rotation.y,
+                            z: joint.rotation.z
+                        });
+                    }
+                }
                 onJointClick(jName);
-            } else {
+            } else if (button === 2) {
+                panActive = true; lastX = cx; lastY = cy;
+            } else if (button === 0) {
                 orbitActive = true; lastX = cx; lastY = cy;
             }
         };
 
         const onMove = (cx, cy) => {
-            if (isDraggingJoint && dragJointName) {
-                const dx = (cx - dragStartX) * 0.014;
-                const dy = (cy - dragStartY) * 0.014;
-                const jg = joints[dragJointName];
-                jg.rotation.y = dragStartRotY + dx;
-                jg.rotation.x = dragStartRotX + dy;
-                onJointRotation(dragJointName, { x: jg.rotation.x, y: jg.rotation.y, z: jg.rotation.z });
+            if (panActive) {
+                const dx = cx - lastX, dy = cy - lastY;
+                root.position.x += dx * 0.003;
+                root.position.y -= dy * 0.003;
+                lastX = cx; lastY = cy;
             } else if (orbitActive) {
                 const dx = cx - lastX, dy = cy - lastY;
                 root.rotation.y += dx * 0.008;
@@ -486,13 +704,21 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
         };
 
         const onUp = () => {
-            isDraggingJoint = false; dragJointName = null; orbitActive = false;
+            orbitActive = false; panActive = false;
         };
 
-        canvas.addEventListener("mousedown",  (e) => onDown(e.clientX, e.clientY));
+        const onWheel = (e) => {
+            e.preventDefault();
+            const zoomSpeed = 0.0005;
+            camera.position.z = Math.max(0.5, Math.min(10, camera.position.z + e.deltaY * zoomSpeed));
+        };
+
+        canvas.addEventListener("mousedown",  (e) => { e.preventDefault(); onDown(e.clientX, e.clientY, e.button); });
+        canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+        canvas.addEventListener("wheel", onWheel, { passive: false });
         window.addEventListener("mousemove",  (e) => onMove(e.clientX, e.clientY));
         window.addEventListener("mouseup",    onUp);
-        canvas.addEventListener("touchstart", (e) => { e.preventDefault(); const t=e.touches[0]; onDown(t.clientX, t.clientY); }, { passive:false });
+        canvas.addEventListener("touchstart", (e) => { e.preventDefault(); const t=e.touches[0]; onDown(t.clientX, t.clientY, 0); }, { passive:false });
         window.addEventListener("touchmove",  (e) => { e.preventDefault(); const t=e.touches[0]; onMove(t.clientX, t.clientY); }, { passive:false });
         window.addEventListener("touchend",   onUp);
 
@@ -514,6 +740,8 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
             cancelAnimationFrame(rafId);
             ro.disconnect();
             canvas.removeEventListener("mousedown",  onDown);
+            canvas.removeEventListener("contextmenu", (e) => e.preventDefault());
+            canvas.removeEventListener("wheel", onWheel);
             window.removeEventListener("mousemove",  onMove);
             window.removeEventListener("mouseup",    onUp);
             canvas.removeEventListener("touchstart", onDown);
@@ -531,6 +759,42 @@ function useThreeScene(canvasRef, selectedJointRef, onJointClick, onJointRotatio
             sphere.material = name === selectedJointRef.current ? selectedMat : jointMat;
         });
     });
+
+    // Expose method to update joint rotations from sliders
+    useEffect(() => {
+        if (setRotationFromSlider && sceneRef.current) {
+            setRotationFromSlider.current = (jointName, rotation) => {
+                const s = sceneRef.current;
+                if (!s || !s.joints[jointName]) return;
+
+                const joint = s.joints[jointName];
+                const initialRot = s.initialRotations?.[jointName];
+
+                if (jointName.includes('pinky_j0')) {
+                    console.log(`Setting ${jointName} rotation:`, rotation);
+                    console.log('Initial rest pose:', initialRot);
+                    console.log('Before:', { x: joint.rotation.x, y: joint.rotation.y, z: joint.rotation.z });
+                }
+
+                // For all finger bones, preserve the initial X and Y, and ADD slider value to initial Z
+                if ((jointName.includes('_j0') || jointName.includes('_j1') || jointName.includes('_j2')) && initialRot) {
+                    joint.rotation.x = initialRot.x;
+                    joint.rotation.y = initialRot.y;
+
+                    // Add the slider offset to the initial Z rotation
+                    joint.rotation.z = initialRot.z + rotation.z;
+                } else {
+                    joint.rotation.x = rotation.x;
+                    joint.rotation.y = rotation.y;
+                    joint.rotation.z = rotation.z;
+                }
+
+                if (jointName.includes('pinky_j0')) {
+                    console.log('After:', { x: joint.rotation.x, y: joint.rotation.y, z: joint.rotation.z });
+                }
+            };
+        }
+    }, [setRotationFromSlider]);
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -539,6 +803,7 @@ export default function ArmViewer() {
     const [selectedJoint, setSelectedJoint]   = useState(null);
     const [jointRotation, setJointRotation]   = useState({});
     const selectedJointRef = useRef(null);
+    const setRotationFromSliderRef = useRef(null);
 
     const handleJointClick = useCallback((name) => {
         selectedJointRef.current = name;
@@ -549,12 +814,21 @@ export default function ArmViewer() {
         setJointRotation(rot);
     }, []);
 
+    const handleSliderRotationChange = useCallback((jointName, rotation) => {
+        // Update the Three.js scene
+        if (setRotationFromSliderRef.current) {
+            setRotationFromSliderRef.current(jointName, rotation);
+        }
+        // Update the UI state
+        setJointRotation(rotation);
+    }, []);
+
     const handleClose = useCallback(() => {
         selectedJointRef.current = null;
         setSelectedJoint(null);
     }, []);
 
-    useThreeScene(canvasRef, selectedJointRef, handleJointClick, handleJointRotation);
+    useThreeScene(canvasRef, selectedJointRef, handleJointClick, handleJointRotation, setRotationFromSliderRef);
 
     return (
         <>
@@ -571,13 +845,18 @@ export default function ArmViewer() {
             }} />
 
             <canvas ref={canvasRef} style={{
-                position:"fixed", inset:0, width:"100%", height:"100%", zIndex:1, touchAction:"none", marginTop:"-100px"
+                position:"fixed", inset:0, width:"100%", height:"100%", zIndex:1, touchAction:"none"
             }} />
 
             <div style={{ position:"fixed", inset:0, zIndex:10, pointerEvents:"none" }}>
                 <div style={{ pointerEvents:"all" }}><ConnectButton /></div>
                 <div style={{ pointerEvents:"all" }}>
-                    <JointPanel joint={selectedJoint} rotation={jointRotation} onClose={handleClose} />
+                    <JointPanel
+                        joint={selectedJoint}
+                        rotation={jointRotation}
+                        onClose={handleClose}
+                        onRotationChange={handleSliderRotationChange}
+                    />
                 </div>
             </div>
         </>
